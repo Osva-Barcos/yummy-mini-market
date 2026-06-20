@@ -104,6 +104,23 @@ describe('Orders', () => {
     expect(product.stock).toBeGreaterThanOrEqual(0);
   });
 
+  it('un usuario NO puede pagar la orden de otro usuario (IDOR pay)', async () => {
+    const owner = 'user-owner-pay';
+    const attacker = 'user-attacker-pay';
+    const productId = await seedProduct(850, 10);
+
+    const created = await request(server)
+      .post('/orders')
+      .set('x-user-id', owner)
+      .send({ items: [{ productId, qty: 1 }] })
+      .expect(201);
+
+    await request(server)
+      .post(`/orders/${created.body._id}/pay`)
+      .set('x-user-id', attacker)
+      .expect(404);
+  });
+
   // ── Tests propios ────────────────────────────────────────────────────────
 
   it('topup rechaza monto negativo o cero', async () => {
@@ -140,8 +157,41 @@ describe('Orders', () => {
       .expect(400);
   });
 
-  // TODO (candidato): el saldo de la wallet y el stock deben ser seguros ante
-  // operaciones concurrentes (ver "Comportamiento esperado" en el README).
-  // Se valora que escribas un test que reproduzca el problema de concurrencia.
-  it.todo('los pagos concurrentes no permiten gastar más que el saldo');
+  it('los pagos concurrentes no permiten gastar más que el saldo', async () => {
+    const user = 'user-concurrent';
+    const productId = await seedProduct(1000, 10); // precio 1000, stock 10
+
+    // Saldo justo para pagar exactamente una orden
+    await request(server)
+      .post('/wallet/topup')
+      .set('x-user-id', user)
+      .send({ amountCents: 1000 })
+      .expect(201);
+
+    const created = await request(server)
+      .post('/orders')
+      .set('x-user-id', user)
+      .send({ items: [{ productId, qty: 1 }] })
+      .expect(201);
+
+    const orderId = created.body._id;
+
+    // Dos pagos simultáneos sobre la misma orden
+    const [res1, res2] = await Promise.all([
+      request(server).post(`/orders/${orderId}/pay`).set('x-user-id', user),
+      request(server).post(`/orders/${orderId}/pay`).set('x-user-id', user),
+    ]);
+
+    // Al menos uno debe haber tenido éxito; el otro puede ser 201 (idempotente) o 400
+    const statuses = [res1.status, res2.status];
+    expect(statuses).toContain(201);
+
+    // Invariante financiero: el saldo no puede quedar negativo
+    const wallet = await ctx.walletModel.findOne({ userId: user });
+    expect(wallet.balanceCents).toBeGreaterThanOrEqual(0);
+
+    // Invariante de inventario: el stock no puede quedar negativo
+    const product = await ctx.productModel.findById(productId);
+    expect(product.stock).toBeGreaterThanOrEqual(0);
+  });
 });

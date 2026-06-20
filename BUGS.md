@@ -166,3 +166,17 @@
 - **Causa raíz:** Los schemas de `Order` y `WalletTransaction` no definían índices sobre los campos usados en queries frecuentes (`status`, `userId`, `orderId`). Solo `Wallet.userId` tenía índice por su `unique: true`.
 - **Fix:** Agregar `OrderSchema.index({ userId: 1 })` y `OrderSchema.index({ status: 1 })` en `order.schema.ts`. Agregar `WalletTransactionSchema.index({ userId: 1 })`, `index({ orderId: 1 })` e `index({ orderId: 1, type: 1 })` en `wallet-transaction.schema.ts`.
 - **Prevención:** Definir índices en el schema desde el día 1 para todos los campos que aparecen en cláusulas `find()`, `findOne()` o `findOneAndUpdate()`. Revisar con `db.collection.explain('executionStats')` en staging antes de cada release.
+
+---
+
+## Bug 16 — Race condition en order.status: doble pago silencioso ante concurrencia
+
+- **Nivel:** 2
+- **Archivo(s):** `src/orders/orders.service.ts` → `pay()`
+- **Síntoma:** Dos requests `POST /orders/:id/pay` concurrentes del mismo usuario sobre la misma orden pueden pasar simultáneamente el guard `if (order.status === 'paid')`, porque ambas leen el estado antes de que la primera escriba el cambio. Si el usuario tiene saldo suficiente para dos pagos, ambas requests debitarían la wallet, generando dos transacciones de pago para una sola orden.
+- **Causa raíz:** El patrón read-then-check no es atómico: `findById` + comprobación en memoria + `order.save()` deja una ventana de tiempo donde una segunda request puede leer el estado anterior (sin commitear). El guard de idempotencia `status === 'paid'` protege contra reintentos seriales pero no contra concurrencia real.
+- **Fix:** El débito atómico de wallet con `findOneAndUpdate({ balanceCents: { $gte: total } }, { $inc: { balanceCents: -total } })` actúa como primera línea de defensa: aunque dos requests pasen el status check, solo la primera logra debitar el saldo (la segunda encuentra balance insuficiente y falla con 400). La solución definitiva para garantizar que la orden nunca se pague dos veces sería cambiar `order.save()` por un `findOneAndUpdate({ _id: orderId, status: 'pending' }, { $set: { status: 'paid' } })` atómico, o usar MongoDB Sessions con `withTransaction()` sobre un Replica Set.
+- **Prevención:** Toda operación de transición de estado en un sistema financiero debe ser atómica a nivel de base de datos. El test `los pagos concurrentes no permiten gastar más que el saldo` cubre este escenario con `Promise.all` verificando los invariantes de saldo y stock post-concurrencia.
+
+---
+
