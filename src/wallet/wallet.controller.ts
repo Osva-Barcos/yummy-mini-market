@@ -1,5 +1,6 @@
 import { Body, Controller, Get, Headers, Post } from '@nestjs/common';
 import { WalletService } from './wallet.service';
+import { TopupDto } from './dto/topup.dto';
 
 @Controller('wallet')
 export class WalletController {
@@ -13,7 +14,7 @@ export class WalletController {
   @Post('topup')
   topup(
     @Headers('x-user-id') userId: string,
-    @Body() body: { amountCents: number },
+    @Body() body: TopupDto,
   ) {
     return this.wallet.topup(userId, body.amountCents);
   }
