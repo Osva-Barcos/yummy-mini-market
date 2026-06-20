@@ -22,3 +22,7 @@ export class WalletTransaction {
 
 export const WalletTransactionSchema =
   SchemaFactory.createForClass(WalletTransaction);
+// Índices para lookup por usuario y por orden (usados en reconciliación y auditoría)
+WalletTransactionSchema.index({ userId: 1 });
+WalletTransactionSchema.index({ orderId: 1 });
+WalletTransactionSchema.index({ orderId: 1, type: 1 });

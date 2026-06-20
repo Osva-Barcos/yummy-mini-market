@@ -104,6 +104,42 @@ describe('Orders', () => {
     expect(product.stock).toBeGreaterThanOrEqual(0);
   });
 
+  // ── Tests propios ────────────────────────────────────────────────────────
+
+  it('topup rechaza monto negativo o cero', async () => {
+    const user = 'user-neg-topup';
+
+    await request(server)
+      .post('/wallet/topup')
+      .set('x-user-id', user)
+      .send({ amountCents: -500 })
+      .expect(400);
+
+    await request(server)
+      .post('/wallet/topup')
+      .set('x-user-id', user)
+      .send({ amountCents: 0 })
+      .expect(400);
+  });
+
+  it('pay con saldo insuficiente devuelve error (no silencio)', async () => {
+    const user = 'user-broke';
+    const productId = await seedProduct(1000, 5);
+
+    // El usuario NO recarga saldo → balance = 0
+    const created = await request(server)
+      .post('/orders')
+      .set('x-user-id', user)
+      .send({ items: [{ productId, qty: 1 }] })
+      .expect(201);
+
+    // El pago debe fallar con un error visible, no con status:'ok' silencioso
+    await request(server)
+      .post(`/orders/${created.body._id}/pay`)
+      .set('x-user-id', user)
+      .expect(400);
+  });
+
   // TODO (candidato): el saldo de la wallet y el stock deben ser seguros ante
   // operaciones concurrentes (ver "Comportamiento esperado" en el README).
   // Se valora que escribas un test que reproduzca el problema de concurrencia.

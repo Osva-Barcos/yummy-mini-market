@@ -28,3 +28,6 @@ export class Order {
 }
 
 export const OrderSchema = SchemaFactory.createForClass(Order);
+// Índices para las queries más frecuentes: filtro por usuario y por estado
+OrderSchema.index({ userId: 1 });
+OrderSchema.index({ status: 1 });
