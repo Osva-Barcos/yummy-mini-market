@@ -18,6 +18,12 @@
     "forceConsistentCasingInFileNames": false,
     "noFallthroughCasesInSwitch": false,
     "esModuleInterop": true,
-    "types": ["jest"]
+    // Bug 17: "types" solo tenía "jest", excluyendo los tipos globales de @types/node
+    // (process, Buffer, etc). "nest build" (usado por Docker) fallaba con
+    // TS2591 "Cannot find name 'process'". No se detectaba corriendo tests porque
+    // test/test-app.ts importa mongodb-memory-server, que arrastra @types/node como
+    // efecto secundario — pero tsconfig.build.json excluye la carpeta test/, así que
+    // el build real (y el de Docker) no tenía ese atajo. Fix: agregar "node" a types.
+    "types": ["jest", "node"]
   }
 }

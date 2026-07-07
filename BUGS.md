@@ -196,3 +196,15 @@
 
 ---
 
+## Bug 17 — "types": ["jest"] excluye @types/node: build de Docker falla con TS2591
+
+- **Nivel:** 1
+- **Archivo(s):** `tsconfig.json`
+- **Ubicación en código:** [tsconfig.json:21](tsconfig.json#L21)
+- **Síntoma:** `docker compose up --build` falla en el paso `RUN npm run build` con `error TS2591: Cannot find name 'process'` en `src/app.module.ts` y `src/main.ts`. `npm run build` local (fuera de Docker) también falla si se corre contra `tsconfig.build.json` directamente. Sin embargo, `npm test` pasaba en verde y nadie lo había detectado.
+- **Causa raíz:** `compilerOptions.types` estaba seteado a `["jest"]`. Esta opción le dice a TypeScript que **solo** cargue los tipos globales de los paquetes listados, ignorando el resto de `@types/*` instalados — incluido `@types/node`, que define globals como `process` y `Buffer`. `nest build` usa `tsconfig.build.json` (que extiende `tsconfig.json` y excluye `test/`), así que no hay ningún archivo que "rescate" esos tipos. En cambio, al correr tests, `test/test-app.ts` importa `mongodb-memory-server`, cuyos tipos internamente resuelven módulos de Node (`fs`, `child_process`, etc.) y eso arrastra de rebote el `globals.d.ts` de `@types/node` — enmascarando el problema real solo en el entorno de test.
+- **Fix:** Agregar `"node"` a la lista: `"types": ["jest", "node"]`.
+- **Prevención:** Si se usa la opción `types` para restringir paquetes globales, hay que listar explícitamente **todos** los que el código de producción necesita (no solo los de testing). Agregar un paso de CI que corra `tsc --noEmit -p tsconfig.build.json` (no solo los tests) para detectar esto antes de mergear — es justo lo que hubiera atrapado este bug antes de intentar levantar Docker.
+
+---
+
