@@ -32,3 +32,4 @@ export class WalletService {
     return wallet;
   }
 }
+ //problema de atomicidadad

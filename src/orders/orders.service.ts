@@ -128,7 +128,7 @@ export class OrdersService {
           update: { $inc: { stock: -item.qty } },
         },
       })),
-    );
+    ); //error que no esta verificado.
 
     // Bug 16 (race condition en order.status): dos requests concurrentes pueden leer
     // status:'pending' antes de que la primera guarde 'paid' (read-then-check no
