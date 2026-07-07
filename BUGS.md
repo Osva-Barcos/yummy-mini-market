@@ -8,6 +8,7 @@
 
 - **Nivel:** 1
 - **Archivo(s):** `Dockerfile`
+- **Ubicación en código:** [Dockerfile:1](Dockerfile#L1)
 - **Síntoma:** `docker compose up --build` termina con error `nest: not found`. La imagen nunca se construye y la app no levanta.
 - **Causa raíz:** `npm ci --omit=dev` instala solo dependencias de producción antes de copiar el código fuente. El comando `npm run build` ejecuta `nest build`, que necesita `@nestjs/cli` (que está en `devDependencies`) → el binario `nest` no existe en el contenedor.
 - **Fix:** Multi-stage build: **Stage 1 (builder)** instala todas las deps (`npm ci`) y compila (`npm run build`). **Stage 2 (runtime)** parte de una imagen limpia, instala solo prod deps y copia únicamente `dist/` del stage anterior. La imagen final no tiene devDeps ni código fuente.
@@ -19,6 +20,7 @@
 
 - **Nivel:** 1
 - **Archivo(s):** `src/app.module.ts`
+- **Ubicación en código:** [src/app.module.ts:11](src/app.module.ts#L11)
 - **Síntoma:** Con Docker la app arranca pero no puede conectarse a MongoDB; logs muestran `ECONNREFUSED 127.0.0.1:27017`. El `docker-compose.yml` pasa `MONGO_URI=mongodb://mongo:27017/market` (apuntando al servicio `mongo`), pero la app lo ignora.
 - **Causa raíz:** `MongooseModule.forRoot('mongodb://localhost:27017/market')` tiene la URI hardcodeada. Dentro del contenedor, `localhost` es el propio contenedor, no el servicio `mongo` definido en `docker-compose`.
 - **Fix:** `MongooseModule.forRoot(process.env.MONGO_URI ?? 'mongodb://localhost:27017/market')`. El fallback mantiene compatibilidad con el modo local (Opción B del README).
@@ -30,6 +32,7 @@
 
 - **Nivel:** 2
 - **Archivo(s):** `src/app-setup.ts`
+- **Ubicación en código:** [src/app-setup.ts:7](src/app-setup.ts#L7)
 - **Síntoma:** Enviar `qty: -3` en `POST /orders` crea una orden con `totalCents` negativo en lugar de devolver 400. Los decoradores de `class-validator` en los DTOs son ignorados.
 - **Causa raíz:** `configureApp()` estaba vacía. Sin `app.useGlobalPipes(new ValidationPipe(...))`, NestJS no procesa los metadatos de validación en ningún endpoint, aunque los decoradores existan en el DTO.
 - **Fix:** Registrar `ValidationPipe` con `{ whitelist: true, forbidNonWhitelisted: true }` en `configureApp`. La misma función se usa en `main.ts` y en `createTestApp`, garantizando que prod y tests tengan la misma configuración.
@@ -41,6 +44,7 @@
 
 - **Nivel:** 2
 - **Archivo(s):** `src/orders/dto/create-order.dto.ts`
+- **Ubicación en código:** [src/orders/dto/create-order.dto.ts:4](src/orders/dto/create-order.dto.ts#L4)
 - **Síntoma:** Incluso con el ValidationPipe activo, `qty: 0` o `qty: -5` no generaban error porque el DTO no tenía ninguna anotación de validación.
 - **Causa raíz:** `CreateOrderItemDto` era una clase plana sin decoradores. `qty: number` acepta cualquier número, incluidos negativos; `productId: string` aceptaba cualquier cadena, no necesariamente un ObjectId válido.
 - **Fix:** Agregar `@IsInt() @Min(1)` sobre `qty`, `@IsMongoId()` sobre `productId`, y `@IsArray() @ArrayMinSize(1) @ValidateNested({ each: true }) @Type(() => CreateOrderItemDto)` sobre `items`. Esto garantiza la regla de negocio "qty > 0" a nivel de entrada.
@@ -52,6 +56,7 @@
 
 - **Nivel:** 2
 - **Archivo(s):** `src/wallet/wallet.controller.ts`
+- **Ubicación en código:** [src/wallet/dto/topup.dto.ts:3](src/wallet/dto/topup.dto.ts#L3) (DTO nuevo, usado en [src/wallet/wallet.controller.ts:17](src/wallet/wallet.controller.ts#L17))
 - **Síntoma:** `POST /wallet/topup` con `{ "amountCents": -1000 }` reduce el saldo del usuario en lugar de rechazar la petición. `amountCents: 0` no hace nada pero tampoco falla.
 - **Causa raíz:** El body del endpoint estaba tipado como `{ amountCents: number }` (tipo inline), no como una clase con decoradores. El ValidationPipe solo valida clases con metadatos de `reflect-metadata`; los tipos inline los ignora.
 - **Fix:** Crear `src/wallet/dto/topup.dto.ts` con `@IsInt() @Min(1) amountCents: number` y usarlo en el controller. Esto garantiza que solo se acepten recargas con montos enteros positivos.
@@ -63,6 +68,7 @@
 
 - **Nivel:** 2
 - **Archivo(s):** `src/orders/orders.service.ts` → `findOneForUser()`
+- **Ubicación en código:** [src/orders/orders.service.ts:154](src/orders/orders.service.ts#L154)
 - **Síntoma:** Un usuario autenticado como `user-A` puede hacer `GET /orders/<id-de-orden-de-user-B>` y recibir la orden completa de otro usuario. El test e2e de IDOR lo reproduce y esperaba 404.
 - **Causa raíz:** `findOneForUser()` buscaba la orden solo por `orderId` sin verificar que `order.userId === userId`. Cualquier ID válido de orden devolvía el documento completo, independientemente de a quién perteneciera.
 - **Fix:** Agregar la verificación `if (!order || order.userId !== userId) throw new NotFoundException(...)`. Se devuelve 404 (y no 403) intencionalmente para no revelar la existencia de la orden a un atacante.
@@ -74,6 +80,7 @@
 
 - **Nivel:** 2
 - **Archivo(s):** `src/orders/orders.service.ts` → `pay()`
+- **Ubicación en código:** [src/orders/orders.service.ts:72](src/orders/orders.service.ts#L72)
 - **Síntoma:** Usuario B puede llamar `POST /orders/<id-de-orden-de-A>/pay`, lo que deduce el saldo de B para pagar una orden que pertenece a A. Si A y B tienen wallets, el saldo de B se reduce sin que B haya creado esa orden.
 - **Causa raíz:** `pay()` verificaba `order.status === 'paid'` pero nunca `order.userId === userId`. La comprobación de pertenencia estaba ausente.
 - **Fix:** Al inicio de `pay()`, verificar `if (!order || order.userId !== userId) throw new NotFoundException(...)`, antes de cualquier operación financiera.
@@ -85,6 +92,7 @@
 
 - **Nivel:** 2
 - **Archivo(s):** `src/orders/orders.service.ts` → `pay()`
+- **Ubicación en código:** [src/orders/orders.service.ts:65](src/orders/orders.service.ts#L65)
 - **Síntoma:** Si la BD falla o cualquier operación lanza una excepción durante el pago, el cliente recibe `{ "status": "ok" }` con HTTP 200. El pago puede haber fallado a mitad (wallet debitada, stock no descontado) y el cliente no lo sabe.
 - **Causa raíz:** El bloque `try/catch` de `pay()` atrapaba cualquier error y devolvía un objeto hardcodeado `{ status: 'ok' }`, enmascarando tanto errores de infraestructura como errores de lógica de negocio.
 - **Fix:** Eliminar el `try/catch`. NestJS maneja las excepciones no capturadas y las convierte en respuestas HTTP adecuadas (`NotFoundException` → 404, `BadRequestException` → 400, errores no controlados → 500). Los errores ahora son visibles en logs y en la respuesta al cliente.
@@ -96,6 +104,7 @@
 
 - **Nivel:** 2
 - **Archivo(s):** `src/orders/orders.service.ts` → `pay()`
+- **Ubicación en código:** [src/orders/orders.service.ts:82](src/orders/orders.service.ts#L82)
 - **Síntoma:** Si el usuario no tiene saldo suficiente (o no tiene wallet), `POST /orders/:id/pay` devuelve la orden con `status: 'pending'` y HTTP 201, como si el pago hubiera quedado encolado. El cliente no puede distinguirlo de un pago exitoso.
 - **Causa raíz:** `if (wallet && wallet.balanceCents >= order.totalCents)` simplemente salteaba el bloque de pago sin lanzar ningún error. La ausencia de wallet también pasaba silenciosamente.
 - **Fix:** Reemplazar el `if` condicional por una operación atómica `findOneAndUpdate` con `$gte` como guard. Si la operación no encuentra un documento (saldo insuficiente o wallet inexistente), lanza `BadRequestException('Saldo insuficiente')` con HTTP 400.
@@ -107,6 +116,7 @@
 
 - **Nivel:** 2
 - **Archivo(s):** `src/orders/orders.service.ts` → `pay()` · `src/wallet/wallet.service.ts` → `topup()`
+- **Ubicación en código:** [src/orders/orders.service.ts:82](src/orders/orders.service.ts#L82)
 - **Síntoma:** Dos peticiones `POST /orders/:id/pay` concurrentes del mismo usuario pueden gastar más saldo del disponible. Ejemplo: saldo = 1000, dos pagos de 800 simultáneos → ambos leen 1000, ambos pasan el guard, ambos guardan 200 → se gastaron 1600 teniendo 1000.
 - **Causa raíz:** El patrón read → modify → write no es atómico. Entre el `findOne` y el `wallet.save()` puede entrar otra request que lea el mismo valor sin modificar.
 - **Fix:** Reemplazar el patrón read-modify-write por `findOneAndUpdate` con `$inc` y un filtro `{ balanceCents: { $gte: totalCents } }`. MongoDB garantiza que el check y el decrement ocurren en una sola operación atómica a nivel de documento.
@@ -118,6 +128,7 @@
 
 - **Nivel:** 2
 - **Archivo(s):** `src/orders/orders.service.ts` → `pay()`
+- **Ubicación en código:** [src/orders/orders.service.ts:104](src/orders/orders.service.ts#L104)
 - **Síntoma:** Si se crea una orden con `qty: 5` y el stock es 1, al pagar, el stock queda en `-4`. El inventario muestra valores negativos, lo que rompe cualquier reporte o lógica posterior que asuma `stock >= 0`.
 - **Causa raíz:** `product.stock -= item.qty` se ejecutaba sin verificar si `product.stock >= item.qty`. No había ningún guard contra stock insuficiente en el flujo de pago.
 - **Fix:** Antes del descuento, verificar `product.stock < item.qty` y lanzar `BadRequestException`. Si el guard falla, se hace rollback del saldo ya debitado. El descuento de stock usa `bulkWrite` con `{ stock: { $gte: item.qty } }` como filtro atómico para mayor seguridad.
@@ -129,6 +140,7 @@
 
 - **Nivel:** 2
 - **Archivo(s):** `src/reconciliation/reconciliation.service.ts`
+- **Ubicación en código:** [src/reconciliation/reconciliation.service.ts:22](src/reconciliation/reconciliation.service.ts#L22)
 - **Síntoma:** Al arrancar la app, `wallet_transactions` crece sin control. Con N órdenes en estado `'pending'`, se insertan N registros cada segundo. La BD se llena en minutos con registros inútiles. El README reporta este síntoma: "la base de datos crece sin control apenas arranca".
 - **Causa raíz:** `setInterval(() => this.reconcilePendingOrders(), 1000)` en `onModuleInit` ejecuta la reconciliación cada segundo. Además, si la función tarda más de 1 segundo (BD con carga), las ejecuciones se solapan generando concurrencia incontrolada. El módulo importa `ScheduleModule` pero no lo usaba.
 - **Fix:** Reemplazar `setInterval` + `OnModuleInit` por `@Cron(CronExpression.EVERY_MINUTE)` de `@nestjs/schedule`. El scheduler de NestJS evita ejecuciones solapadas y se integra con el ciclo de vida del módulo.
@@ -140,6 +152,7 @@
 
 - **Nivel:** 2
 - **Archivo(s):** `src/reconciliation/reconciliation.service.ts`
+- **Ubicación en código:** [src/reconciliation/reconciliation.service.ts:34](src/reconciliation/reconciliation.service.ts#L34)
 - **Síntoma:** Una orden `'pending'` que lleva 5 minutos genera 300 registros de reconciliación idénticos (con `setInterval` de 1 seg) o al menos uno por cada ejecución del cron aunque la orden ya fue flaggeada antes.
 - **Causa raíz:** `reconcilePendingOrders()` creaba una `WalletTransaction` nueva para cada orden `'pending'` en cada ejecución, sin verificar si ya existía un registro de reconciliación para esa orden. La función nunca marcaba la orden como procesada.
 - **Fix:** Antes de insertar, verificar `await this.txModel.exists({ orderId, type: 'reconciliation' })`. Si ya existe, se omite. Esto hace la operación idempotente: se puede ejecutar N veces y el resultado es el mismo que ejecutarla una vez.
@@ -151,6 +164,7 @@
 
 - **Nivel:** 3
 - **Archivo(s):** `src/orders/orders.service.ts`
+- **Ubicación en código:** [src/orders/orders.service.ts:34](src/orders/orders.service.ts#L34) (`create()`) · [src/orders/orders.service.ts:98](src/orders/orders.service.ts#L98) y [:121](src/orders/orders.service.ts#L121) (`pay()`)
 - **Síntoma:** Una orden con 10 ítems genera 10 queries a MongoDB en `create()` y otras 10 en `pay()` (más 10 writes individuales para el stock). Con carga, cada llamada produce decenas de roundtrips innecesarios a la BD.
 - **Causa raíz:** `for (const item of dto.items) { await this.productModel.findById(...) }` ejecuta una query por iteración en lugar de una sola query batch. En `pay()`, también se usaba `product.save()` individual por cada ítem.
 - **Fix:** Batch-fetch con `this.productModel.find({ _id: { $in: productIds } })` y un `Map` para lookup O(1). Para los writes del stock en `pay()`, usar `productModel.bulkWrite()` con una operación `updateOne` por ítem en una sola llamada a la BD.
@@ -162,6 +176,7 @@
 
 - **Nivel:** 3
 - **Archivo(s):** `src/orders/schemas/order.schema.ts` · `src/wallet/schemas/wallet-transaction.schema.ts`
+- **Ubicación en código:** [src/orders/schemas/order.schema.ts:31](src/orders/schemas/order.schema.ts#L31) · [src/wallet/schemas/wallet-transaction.schema.ts:25](src/wallet/schemas/wallet-transaction.schema.ts#L25)
 - **Síntoma:** En producción con miles de órdenes, `find({ status: 'pending' })` en la reconciliación hace un full collection scan cada minuto. `find({ orderId, type: 'reconciliation' })` también hace full scan por `wallet_transactions`.
 - **Causa raíz:** Los schemas de `Order` y `WalletTransaction` no definían índices sobre los campos usados en queries frecuentes (`status`, `userId`, `orderId`). Solo `Wallet.userId` tenía índice por su `unique: true`.
 - **Fix:** Agregar `OrderSchema.index({ userId: 1 })` y `OrderSchema.index({ status: 1 })` en `order.schema.ts`. Agregar `WalletTransactionSchema.index({ userId: 1 })`, `index({ orderId: 1 })` e `index({ orderId: 1, type: 1 })` en `wallet-transaction.schema.ts`.
@@ -173,6 +188,7 @@
 
 - **Nivel:** 2
 - **Archivo(s):** `src/orders/orders.service.ts` → `pay()`
+- **Ubicación en código:** [src/orders/orders.service.ts:133](src/orders/orders.service.ts#L133)
 - **Síntoma:** Dos requests `POST /orders/:id/pay` concurrentes del mismo usuario sobre la misma orden pueden pasar simultáneamente el guard `if (order.status === 'paid')`, porque ambas leen el estado antes de que la primera escriba el cambio. Si el usuario tiene saldo suficiente para dos pagos, ambas requests debitarían la wallet, generando dos transacciones de pago para una sola orden.
 - **Causa raíz:** El patrón read-then-check no es atómico: `findById` + comprobación en memoria + `order.save()` deja una ventana de tiempo donde una segunda request puede leer el estado anterior (sin commitear). El guard de idempotencia `status === 'paid'` protege contra reintentos seriales pero no contra concurrencia real.
 - **Fix:** El débito atómico de wallet con `findOneAndUpdate({ balanceCents: { $gte: total } }, { $inc: { balanceCents: -total } })` actúa como primera línea de defensa: aunque dos requests pasen el status check, solo la primera logra debitar el saldo (la segunda encuentra balance insuficiente y falla con 400). La solución definitiva para garantizar que la orden nunca se pague dos veces sería cambiar `order.save()` por un `findOneAndUpdate({ _id: orderId, status: 'pending' }, { $set: { status: 'paid' } })` atómico, o usar MongoDB Sessions con `withTransaction()` sobre un Replica Set.

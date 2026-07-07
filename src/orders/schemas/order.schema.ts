@@ -28,6 +28,8 @@ export class Order {
 }
 
 export const OrderSchema = SchemaFactory.createForClass(Order);
-// Índices para las queries más frecuentes: filtro por usuario y por estado
+// Bug 15: no había índices sobre los campos usados en queries frecuentes,
+// causando full collection scan en la reconciliación (find({status:'pending'})
+// corre cada minuto). Fix: índices para filtro por usuario y por estado.
 OrderSchema.index({ userId: 1 });
 OrderSchema.index({ status: 1 });

@@ -22,7 +22,9 @@ export class WalletTransaction {
 
 export const WalletTransactionSchema =
   SchemaFactory.createForClass(WalletTransaction);
-// Índices para lookup por usuario y por orden (usados en reconciliación y auditoría)
+// Bug 15: faltaban índices; find({orderId, type: 'reconciliation'}) (chequeo de
+// idempotencia del Bug 13) hacía full collection scan. Fix: índices para lookup
+// por usuario y por orden, más el compuesto {orderId, type} que cubre esa query exacta.
 WalletTransactionSchema.index({ userId: 1 });
 WalletTransactionSchema.index({ orderId: 1 });
 WalletTransactionSchema.index({ orderId: 1, type: 1 });

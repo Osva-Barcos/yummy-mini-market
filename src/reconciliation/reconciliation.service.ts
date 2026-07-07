@@ -19,9 +19,11 @@ export class ReconciliationService {
     private readonly txModel: Model<WalletTransactionDocument>,
   ) {}
 
-  // Fix: usar @Cron en vez de setInterval para integrarse con el scheduler de NestJS
-  // y evitar ejecuciones solapadas. Cada minuto es suficiente para detectar órdenes
-  // que llevan tiempo sin pagarse.
+  // Bug 12: antes esto corría con setInterval(1000) en onModuleInit, ejecutando
+  // la reconciliación cada segundo y solapándose si tardaba más de 1s — la BD
+  // se llenaba de registros sin control. Fix: usar @Cron en vez de setInterval,
+  // para integrarse con el scheduler de NestJS y evitar ejecuciones solapadas.
+  // Cada minuto es suficiente para detectar órdenes que llevan tiempo sin pagarse.
   @Cron(CronExpression.EVERY_MINUTE)
   async reconcilePendingOrders(): Promise<void> {
     const pending = await this.orderModel.find({ status: 'pending' });
@@ -29,8 +31,10 @@ export class ReconciliationService {
     for (const order of pending) {
       const orderId = order._id.toString();
 
-      // Fix idempotencia: solo crear la tx si todavía no existe una para esta orden.
-      // Previene la acumulación infinita de registros duplicados.
+      // Bug 13: antes se creaba una WalletTransaction nueva en cada corrida,
+      // sin chequear si ya existía una para esa orden — con el setInterval de 1seg
+      // esto duplicaba registros sin parar. Fix: verificar si ya existe una tx de
+      // tipo 'reconciliation' para esta orden antes de insertar (operación idempotente).
       const alreadyFlagged = await this.txModel.exists({
         orderId,
         type: 'reconciliation',

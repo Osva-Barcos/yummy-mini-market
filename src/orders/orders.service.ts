@@ -31,7 +31,8 @@ export class OrdersService {
   ) {}
 
   async create(userId: string, dto: CreateOrderDto) {
-    // Fix N+1: batch-fetch all products in a single query
+    // Bug 14 (N+1): antes se hacía un findById por cada item dentro de un for.
+    // Fix: una sola query con $in trae todos los productos del pedido de una vez.
     const productIds = dto.items.map((i) => i.productId);
     const products = await this.productModel.find({ _id: { $in: productIds } });
     const productMap = new Map(products.map((p) => [p._id.toString(), p]));
@@ -61,10 +62,15 @@ export class OrdersService {
     });
   }
 
+  // Bug 8: este método tenía un try/catch que atrapaba cualquier error y devolvía
+  // { status: 'ok' } hardcodeado, ocultando fallos de infraestructura y de negocio.
+  // Fix: se eliminó el try/catch. Las excepciones no atrapadas las convierte NestJS
+  // automáticamente en la respuesta HTTP correcta (NotFoundException → 404, etc).
   async pay(userId: string, orderId: string) {
     const order = await this.orderModel.findById(orderId);
 
-    // Fix IDOR: verify the order belongs to the requesting user
+    // Bug 7 (IDOR): antes no se verificaba que la orden fuera del usuario que paga.
+    // Usuario B podía pagar (y que se le descuente el saldo a B) una orden de A.
     if (!order || order.userId !== userId) {
       throw new NotFoundException('Orden no encontrada');
     }
@@ -73,9 +79,12 @@ export class OrdersService {
       return order;
     }
 
-    // Fix race condition + saldo insuficiente: check-and-decrement atómico.
-    // findOneAndUpdate con $gte garantiza que solo descuenta si hay saldo suficiente
-    // y lo hace en una sola operación de escritura → safe ante pagos concurrentes.
+    // Bug 9 (saldo insuficiente no daba error) + Bug 10 (race condition / double-spend):
+    // antes se hacía "if (wallet.balanceCents >= total)" leyendo en memoria, lo que
+    // dejaba una ventana entre leer y guardar donde dos pagos concurrentes podían
+    // gastar más saldo del disponible. Fix: findOneAndUpdate con $gte como guard
+    // en el filtro y $inc en el update → chequeo y descuento en una sola operación
+    // atómica de Mongo, segura ante pagos concurrentes.
     const wallet = await this.walletModel.findOneAndUpdate(
       { userId, balanceCents: { $gte: order.totalCents } },
       { $inc: { balanceCents: -order.totalCents } },
@@ -86,12 +95,15 @@ export class OrdersService {
       throw new BadRequestException('Saldo insuficiente');
     }
 
-    // Fix N+1 en pay: batch-fetch todos los productos del pedido en una sola query
+    // Bug 14 (N+1): batch-fetch de todos los productos del pedido en una sola query,
+    // en vez de un findById por item dentro de un for.
     const productIds = order.items.map((i) => i.productId);
     const products = await this.productModel.find({ _id: { $in: productIds } });
     const productMap = new Map(products.map((p) => [p._id.toString(), p]));
 
-    // Fix oversell: verificar stock antes de descontar
+    // Bug 11 (oversell): antes se descontaba el stock sin verificar que alcanzara,
+    // dejando el stock en negativo. Fix: verificar stock suficiente por ítem antes
+    // de tocar la BD; si falta, se hace rollback del saldo ya debitado arriba.
     for (const item of order.items) {
       const product = productMap.get(item.productId.toString());
       if (!product || product.stock < item.qty) {
@@ -106,7 +118,9 @@ export class OrdersService {
       }
     }
 
-    // Descontar stock en una sola operación de escritura bulk (fix N+1 writes)
+    // Bug 14 (N+1 en escrituras): antes se guardaba el stock producto por producto
+    // (product.save() dentro de un for). Fix: bulkWrite agrupa todas las escrituras
+    // en una sola llamada, y el filtro $gte es una segunda barrera atómica anti-oversell.
     await this.productModel.bulkWrite(
       order.items.map((item) => ({
         updateOne: {
@@ -116,6 +130,12 @@ export class OrdersService {
       })),
     );
 
+    // Bug 16 (race condition en order.status): dos requests concurrentes pueden leer
+    // status:'pending' antes de que la primera guarde 'paid' (read-then-check no
+    // atómico). El findOneAndUpdate de la wallet ya frena el double-spend real
+    // (la segunda request no tiene saldo), pero la solución completa sería hacer
+    // este cambio de estado también atómico: findOneAndUpdate({_id, status:'pending'},
+    // {$set:{status:'paid'}}), o usar Mongo Sessions con withTransaction().
     order.status = 'paid';
     await order.save();
 
@@ -131,7 +151,10 @@ export class OrdersService {
 
   async findOneForUser(userId: string, orderId: string) {
     const order = await this.orderModel.findById(orderId);
-    // Fix IDOR: un usuario solo puede ver sus propias órdenes
+    // Bug 6 (IDOR): antes se buscaba la orden solo por orderId, sin verificar
+    // dueño — cualquier usuario podía ver la orden completa de otro con solo
+    // conocer su ID. Fix: comparar order.userId === userId; se devuelve 404
+    // (no 403) para no revelar que la orden existe.
     if (!order || order.userId !== userId) {
       throw new NotFoundException('Orden no encontrada');
     }
