@@ -25,6 +25,9 @@ export class Order {
 
   @Prop({ required: true, default: 'pending' })
   status: string;
+
+  @Prop()
+  idempotencyKey?: string;
 }
 
 export const OrderSchema = SchemaFactory.createForClass(Order);
@@ -33,3 +36,9 @@ export const OrderSchema = SchemaFactory.createForClass(Order);
 // corre cada minuto). Fix: índices para filtro por usuario y por estado.
 OrderSchema.index({ userId: 1 });
 OrderSchema.index({ status: 1 });
+// Hallazgo de revisión: dedupe de POST /orders. Único y sparse para que solo
+// aplique cuando el cliente manda idempotencyKey (no afecta órdenes sin ella).
+OrderSchema.index(
+  { userId: 1, idempotencyKey: 1 },
+  { unique: true, sparse: true },
+);

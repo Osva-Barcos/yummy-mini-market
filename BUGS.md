@@ -208,3 +208,63 @@
 
 ---
 
+## Bug 18 — Resultado de bulkWrite no verificado en pay(): pago "paid" sin descontar stock
+
+- **Nivel:** 2
+- **Archivo(s):** `src/orders/orders.service.ts` → `pay()`
+- **Ubicación en código:** [src/orders/orders.service.ts:138](src/orders/orders.service.ts#L138)
+- **Síntoma:** Detectado en revisión con `backend-standards-reviewer`. Dos pagos concurrentes sobre órdenes **distintas** que comparten un producto con poco stock (ej. stock=1, orden A y orden B piden qty=1 cada una) podían terminar ambos con HTTP 201 y `status: 'paid'`, pero solo uno de los dos productos realmente descontado — la otra orden queda marcada como pagada (y su wallet debitada) sin que el stock correspondiente se haya movido. Es una inconsistencia financiera/de inventario silenciosa, sin error visible al cliente.
+- **Causa raíz:** El descuento de stock se hacía con un pre-check en JS (leyendo `stock` de un `find()` batch) seguido de un único `bulkWrite()` con filtro atómico `{ stock: { $gte: qty } }` por ítem — pero el resultado de ese `bulkWrite` nunca se comprobaba (había incluso un comentario inline marcándolo: `//error que no esta verificado.`). Dos requests concurrentes sobre órdenes distintas pasan ambas el pre-check en JS (leen el mismo stock antes de que cualquiera escriba), pero al escribir, si el filtro `$gte` de una de ellas ya no matchea (porque la otra decrementó primero), esa operación simplemente no aplica (no es un error, es un "no match") y la ejecución seguía igual: `order.status = 'paid'` y la `WalletTransaction` de pago se creaban sin importar si el stock realmente se había descontado.
+- **Fix:** Reemplazar el pre-check en JS + `bulkWrite` sin verificar por un `findOneAndUpdate` atómico por ítem (`{ _id, stock: { $gte: qty } }` + `$inc`) ejecutado en paralelo con `Promise.all` (no secuencial, para no reintroducir el N+1 del Bug 14), verificando el resultado de cada uno. Si algún ítem falla, se revierte con un `bulkWrite` el stock de los ítems que sí se habían descontado y se hace rollback del saldo debitado, antes de lanzar `BadRequestException`.
+- **Prevención:** Ninguna operación de escritura que respalde un invariante financiero o de inventario debe ejecutarse sin verificar su resultado — un `bulkWrite`/`updateOne` con filtro atómico que "silenciosamente no aplica" es indistinguible de un éxito si nadie revisa `matchedCount`/`modifiedCount`. Test agregado: `pagos concurrentes de DOS órdenes distintas que compiten por el mismo stock no dejan wallet debitada sin stock descontado` en `test/orders.e2e-spec.ts`.
+
+---
+
+## Bug 19 — N+1 en la reconciliación: exists() + create() por orden dentro de un for
+
+- **Nivel:** 3
+- **Archivo(s):** `src/reconciliation/reconciliation.service.ts` → `reconcilePendingOrders()`
+- **Ubicación en código:** [src/reconciliation/reconciliation.service.ts:29](src/reconciliation/reconciliation.service.ts#L29)
+- **Síntoma:** Detectado en revisión con `backend-standards-reviewer`. Con un backlog grande de órdenes `pending`, cada tick del cron (cada minuto) disparaba un `txModel.exists()` y, si correspondía, un `txModel.create()` por cada orden, dentro de un `for...of` secuencial — decenas o cientos de roundtrips a Mongo por corrida.
+- **Causa raíz:** Mismo patrón que el Bug 14 corrigió en `orders.service.ts` (`await` dentro de un `for` sobre un array), pero nunca aplicado aquí — el chequeo de idempotencia del Bug 13 se implementó correcto pero query-por-query.
+- **Fix:** Un solo `find({ orderId: { $in: pendingIds }, type: 'reconciliation' })` para saber qué órdenes ya están flaggeadas (`Set`), y un solo `insertMany()` para las que faltan, en vez de un `exists()`+`create()` por orden.
+- **Prevención:** Mismo checklist del Bug 14: `await` dentro de un `for...of` sobre un array de IDs es casi siempre un N+1, sin importar si el código está en un service HTTP o en un cron. Tests agregados en `test/reconciliation.e2e-spec.ts`, instanciando `ReconciliationService` directo con los modelos de test (sin activar el `@Cron`, igual que documenta la sección "Bugs sin test directo" de `TESTS.md`), verificando que el batching sigue siendo idempotente y no toca órdenes `paid`.
+
+---
+
+## Bug 20 — x-user-id sin validar: header ausente llega como undefined a ownership checks y filtros de Mongo
+
+- **Nivel:** 3
+- **Archivo(s):** `src/orders/orders.controller.ts`, `src/wallet/wallet.controller.ts`
+- **Ubicación en código:** antes en `@Headers('x-user-id') userId: string` de ambos controllers; fix en [src/common/decorators/user-id.decorator.ts](src/common/decorators/user-id.decorator.ts)
+- **Síntoma:** Detectado en revisión con `backend-standards-reviewer`. Si un caller omitía el header `x-user-id`, `userId` llegaba como `undefined` a los services. En `orders`, esto producía comparaciones de ownership contra `undefined` (404 confusos). En `wallet`, como `Wallet.userId` es `unique`, dos callers distintos que ambos omitieran el header podían competir por el mismo documento "sin dueño" y disparar un `E11000 duplicate key` no manejado (500) en lugar de un error de autenticación claro.
+- **Causa raíz:** `@Headers('x-user-id')` extrae el valor del header tal cual, incluyendo `undefined` si no viene, sin ningún guard que lo rechace antes de llegar a los services.
+- **Fix:** Decorador de parámetro `@UserId()` (`createParamDecorator`) que lee el header y lanza `UnauthorizedException` (401) si viene ausente o vacío, usado en vez de `@Headers('x-user-id')` en `OrdersController` y `WalletController`. No se aplicó como guard global porque `ProductsController` no requiere `x-user-id` (es público).
+- **Prevención:** Todo endpoint cuya identidad depende de un header (en ausencia de un sistema de auth real) debe validar la presencia de ese header antes de usarlo en cualquier filtro o comparación. Tests agregados: `GET /orders/:id`, `GET /wallet` y `POST /wallet/topup` sin `x-user-id` devuelven 401.
+
+---
+
+## Bug 21 — :id sin validar como ObjectId: CastError de Mongoose se convierte en 500
+
+- **Nivel:** 3
+- **Archivo(s):** `src/orders/orders.controller.ts`
+- **Ubicación en código:** antes en `@Param('id') id: string`; fix en [src/common/pipes/parse-object-id.pipe.ts](src/common/pipes/parse-object-id.pipe.ts)
+- **Síntoma:** Detectado en revisión con `backend-standards-reviewer`. `GET /orders/:id` o `POST /orders/:id/pay` con un `id` que no es un ObjectId válido (ej. `"abc"`) no devolvía un 400 limpio, sino un 500 genérico: `orderModel.findById(id)` lanza un `CastError` de Mongoose, que no es una `HttpException` y por lo tanto el filtro de excepciones por defecto de Nest lo convierte en Internal Server Error.
+- **Causa raíz:** El parámetro de ruta `id` no tenía ninguna validación de formato antes de llegar a `findById()`.
+- **Fix:** Pipe propio `ParseObjectIdPipe` (Nest 10 no trae uno en `@nestjs/common` en esta versión) que valida con `Types.ObjectId.isValid()` y lanza `BadRequestException` (400) si el id es inválido, aplicado con `@Param('id', ParseObjectIdPipe)` en ambas rutas.
+- **Prevención:** Todo `@Param()` que se use directamente en una query de Mongoose (`findById`, `findOne({_id: ...})`) debe validarse como ObjectId antes de llegar al service. Tests agregados: `GET /orders/:id` y `POST /orders/:id/pay` con id malformado devuelven 400.
+
+---
+
+## Bug 22 — POST /orders sin idempotencia: retry o doble-click duplica la orden
+
+- **Nivel:** 3
+- **Archivo(s):** `src/orders/orders.controller.ts`, `src/orders/orders.service.ts` → `create()`, `src/orders/dto/create-order.dto.ts`, `src/orders/schemas/order.schema.ts`
+- **Ubicación en código:** [src/orders/orders.service.ts:33](src/orders/orders.service.ts#L33)
+- **Síntoma:** Detectado en revisión con `backend-standards-reviewer`. Un retry de red o un doble-click en el checkout creaba una segunda orden `'pending'` idéntica (mismos items, mismo usuario). Esto no mueve dinero por sí solo, pero si el cliente termina pagando ambas órdenes duplicadas, paga dos veces la misma intención de compra.
+- **Causa raíz:** `create()` no tenía ningún mecanismo de deduplicación — cada `POST /orders` insertaba una orden nueva sin importar si ya existía una equivalente reciente.
+- **Fix:** Campo opcional `idempotencyKey` en `CreateOrderDto` (generado por el cliente), guardado en `Order` y respaldado por un índice único y `sparse` `{ userId: 1, idempotencyKey: 1 }` (sparse para no afectar órdenes que no mandan la key). En `create()`, si viene `idempotencyKey`, se busca primero una orden existente con esa combinación (atajo para el caso serial); si no existe, se intenta crear y, si el índice único rechaza el insert por una carrera real (dos requests concurrentes con la misma key), se recupera y devuelve la orden ya creada por la otra request en vez de propagar el error de duplicado.
+- **Prevención:** Todo endpoint de creación que pueda sufrir retries de red (checkout, pagos, cualquier operación no-idempotente por default) debería aceptar una idempotency key opcional respaldada por un índice único, siguiendo el mismo patrón de "invariante en la base de datos, no solo en la app" que ya usa `pay()` para saldo y stock. Tests agregados: retry serial y dos requests concurrentes con la misma `idempotencyKey` devuelven la misma orden y no duplican el registro.
+
+---
+

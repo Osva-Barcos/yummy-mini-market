@@ -8,12 +8,16 @@ import { OrdersModule } from '../src/orders/orders.module';
 import { WalletModule } from '../src/wallet/wallet.module';
 import { Product } from '../src/products/schemas/product.schema';
 import { Wallet } from '../src/wallet/schemas/wallet.schema';
+import { Order } from '../src/orders/schemas/order.schema';
+import { WalletTransaction } from '../src/wallet/schemas/wallet-transaction.schema';
 import { configureApp } from '../src/app-setup';
 
 export interface TestContext {
   app: INestApplication;
   productModel: Model<any>;
   walletModel: Model<any>;
+  orderModel: Model<any>;
+  txModel: Model<any>;
   stop: () => Promise<void>;
 }
 
@@ -41,11 +45,15 @@ export async function createTestApp(): Promise<TestContext> {
 
   const productModel = moduleRef.get<Model<any>>(getModelToken(Product.name));
   const walletModel = moduleRef.get<Model<any>>(getModelToken(Wallet.name));
+  const orderModel = moduleRef.get<Model<any>>(getModelToken(Order.name));
+  const txModel = moduleRef.get<Model<any>>(
+    getModelToken(WalletTransaction.name),
+  );
 
   const stop = async () => {
     await app.close();
     await mongod.stop();
   };
 
-  return { app, productModel, walletModel, stop };
+  return { app, productModel, walletModel, orderModel, txModel, stop };
 }

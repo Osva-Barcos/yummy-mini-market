@@ -27,30 +27,47 @@ export class ReconciliationService {
   @Cron(CronExpression.EVERY_MINUTE)
   async reconcilePendingOrders(): Promise<void> {
     const pending = await this.orderModel.find({ status: 'pending' });
+    if (pending.length === 0) {
+      return;
+    }
 
-    for (const order of pending) {
-      const orderId = order._id.toString();
+    const orderIds = pending.map((order) => order._id.toString());
 
-      // Bug 13: antes se creaba una WalletTransaction nueva en cada corrida,
-      // sin chequear si ya existía una para esa orden — con el setInterval de 1seg
-      // esto duplicaba registros sin parar. Fix: verificar si ya existe una tx de
-      // tipo 'reconciliation' para esta orden antes de insertar (operación idempotente).
-      const alreadyFlagged = await this.txModel.exists({
-        orderId,
+    // Bug 13: antes se creaba una WalletTransaction nueva en cada corrida,
+    // sin chequear si ya existía una para esa orden — con el setInterval de 1seg
+    // esto duplicaba registros sin parar. Fix: verificar si ya existe una tx de
+    // tipo 'reconciliation' para esta orden antes de insertar (operación idempotente).
+    // Hallazgo de revisión: ese chequeo se hacía con un exists() + create() por
+    // orden dentro de un for (mismo patrón N+1 que Bug 14 corrigió en orders.service.ts,
+    // pero nunca aplicado aquí). Fix: un solo find con $in para saber qué órdenes ya
+    // están flaggeadas, y un solo insertMany para las que faltan.
+    const alreadyFlagged = await this.txModel.find(
+      { orderId: { $in: orderIds }, type: 'reconciliation' },
+      { orderId: 1 },
+    );
+    const flaggedSet = new Set(alreadyFlagged.map((tx) => tx.orderId));
+
+    const toInsert = pending.filter(
+      (order) => !flaggedSet.has(order._id.toString()),
+    );
+
+    if (toInsert.length === 0) {
+      return;
+    }
+
+    await this.txModel.insertMany(
+      toInsert.map((order) => ({
+        userId: order.userId,
+        amountCents: 0,
         type: 'reconciliation',
-      });
+        orderId: order._id.toString(),
+      })),
+    );
 
-      if (!alreadyFlagged) {
-        await this.txModel.create({
-          userId: order.userId,
-          amountCents: 0,
-          type: 'reconciliation',
-          orderId,
-        });
-        this.logger.warn(
-          `Orden ${orderId} lleva tiempo en estado pending — reconciliation creada`,
-        );
-      }
+    for (const order of toInsert) {
+      this.logger.warn(
+        `Orden ${order._id.toString()} lleva tiempo en estado pending — reconciliation creada`,
+      );
     }
   }
 }

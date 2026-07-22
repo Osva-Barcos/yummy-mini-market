@@ -31,6 +31,19 @@ export class OrdersService {
   ) {}
 
   async create(userId: string, dto: CreateOrderDto) {
+    // Hallazgo de revisión: un retry de red o doble-click en POST /orders creaba
+    // una segunda orden 'pending' idéntica. Si el cliente manda idempotencyKey,
+    // devolver la orden ya creada en vez de duplicarla.
+    if (dto.idempotencyKey) {
+      const existing = await this.orderModel.findOne({
+        userId,
+        idempotencyKey: dto.idempotencyKey,
+      });
+      if (existing) {
+        return existing;
+      }
+    }
+
     // Bug 14 (N+1): antes se hacía un findById por cada item dentro de un for.
     // Fix: una sola query con $in trae todos los productos del pedido de una vez.
     const productIds = dto.items.map((i) => i.productId);
@@ -54,12 +67,29 @@ export class OrdersService {
       });
     }
 
-    return this.orderModel.create({
-      userId,
-      items,
-      totalCents: total,
-      status: 'pending',
-    });
+    try {
+      return await this.orderModel.create({
+        userId,
+        items,
+        totalCents: total,
+        status: 'pending',
+        idempotencyKey: dto.idempotencyKey,
+      });
+    } catch (err: any) {
+      // El índice único {userId, idempotencyKey} es la barrera atómica real
+      // contra dos creates concurrentes con la misma key (el findOne de arriba
+      // es solo un atajo para el caso serial, no evita la carrera).
+      if (err?.code === 11000 && dto.idempotencyKey) {
+        const existing = await this.orderModel.findOne({
+          userId,
+          idempotencyKey: dto.idempotencyKey,
+        });
+        if (existing) {
+          return existing;
+        }
+      }
+      throw err;
+    }
   }
 
   // Bug 8: este método tenía un try/catch que atrapaba cualquier error y devolvía
@@ -95,40 +125,48 @@ export class OrdersService {
       throw new BadRequestException('Saldo insuficiente');
     }
 
-    // Bug 14 (N+1): batch-fetch de todos los productos del pedido en una sola query,
-    // en vez de un findById por item dentro de un for.
-    const productIds = order.items.map((i) => i.productId);
-    const products = await this.productModel.find({ _id: { $in: productIds } });
-    const productMap = new Map(products.map((p) => [p._id.toString(), p]));
+    // Bug 11 (oversell) + hallazgo de revisión (resultado de bulkWrite no verificado):
+    // el filtro { stock: { $gte: qty } } es la barrera atómica real anti-oversell,
+    // pero un pre-check en JS + bulkWrite sin comprobar su resultado deja una ventana:
+    // dos pagos concurrentes sobre el mismo producto pueden pasar ambos el pre-check
+    // (leen el mismo stock antes de que el primero escriba), y si el segundo update
+    // no matchea, el pago se marca "paid" y se descuenta la wallet igual, sin que el
+    // stock se haya descontado. Fix: decrementar cada ítem con su propio
+    // findOneAndUpdate atómico (en paralelo, no secuencial → no reintroduce el N+1
+    // del Bug 14) y verificar el resultado de cada uno. Si alguno falla, se revierte
+    // el stock de los ítems que sí se descontaron y el saldo ya debitado.
+    const stockUpdates = await Promise.all(
+      order.items.map((item) =>
+        this.productModel.findOneAndUpdate(
+          { _id: item.productId, stock: { $gte: item.qty } },
+          { $inc: { stock: -item.qty } },
+        ),
+      ),
+    );
 
-    // Bug 11 (oversell): antes se descontaba el stock sin verificar que alcanzara,
-    // dejando el stock en negativo. Fix: verificar stock suficiente por ítem antes
-    // de tocar la BD; si falta, se hace rollback del saldo ya debitado arriba.
-    for (const item of order.items) {
-      const product = productMap.get(item.productId.toString());
-      if (!product || product.stock < item.qty) {
-        // Rollback del saldo debitado
-        await this.walletModel.findOneAndUpdate(
-          { userId },
-          { $inc: { balanceCents: order.totalCents } },
-        );
-        throw new BadRequestException(
-          `Stock insuficiente para producto ${item.productId}`,
+    const failedIndex = stockUpdates.findIndex((updated) => !updated);
+
+    if (failedIndex !== -1) {
+      const succeededItems = order.items.filter((_, i) => stockUpdates[i]);
+      if (succeededItems.length > 0) {
+        await this.productModel.bulkWrite(
+          succeededItems.map((item) => ({
+            updateOne: {
+              filter: { _id: item.productId },
+              update: { $inc: { stock: item.qty } },
+            },
+          })),
         );
       }
+      // Rollback del saldo debitado
+      await this.walletModel.findOneAndUpdate(
+        { userId },
+        { $inc: { balanceCents: order.totalCents } },
+      );
+      throw new BadRequestException(
+        `Stock insuficiente para producto ${order.items[failedIndex].productId}`,
+      );
     }
-
-    // Bug 14 (N+1 en escrituras): antes se guardaba el stock producto por producto
-    // (product.save() dentro de un for). Fix: bulkWrite agrupa todas las escrituras
-    // en una sola llamada, y el filtro $gte es una segunda barrera atómica anti-oversell.
-    await this.productModel.bulkWrite(
-      order.items.map((item) => ({
-        updateOne: {
-          filter: { _id: item.productId, stock: { $gte: item.qty } },
-          update: { $inc: { stock: -item.qty } },
-        },
-      })),
-    ); //error que no esta verificado.
 
     // Bug 16 (race condition en order.status): dos requests concurrentes pueden leer
     // status:'pending' antes de que la primera guarde 'paid' (read-then-check no
